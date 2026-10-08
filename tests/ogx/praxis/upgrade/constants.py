@@ -1,6 +1,6 @@
 """Constants for the OGX -> Praxis database migration tests."""
 
-from typing import Literal
+from typing import Any, Literal
 
 # Source (OGX) tables. Both live in the OGX PostgreSQL database deployed by the
 # `postgres_deployment` fixture. The names come from the built-in config of the
@@ -92,3 +92,43 @@ CITATION_MAX_OUTPUT_TOKENS: int = 512
 # equivalents are compared instead.
 COMPARED_FILE_FIELDS: tuple[str, ...] = ("id", "bytes", "filename", "created_at", "status")
 COMPARED_VECTOR_STORE_FIELDS: tuple[str, ...] = ("id", "name", "created_at", "status")
+
+# Equivalent sets for the two remaining resource kinds the state inventory samples.
+COMPARED_RESPONSE_FIELDS: tuple[str, ...] = ("id", "created_at", "model", "status")
+COMPARED_CONVERSATION_FIELDS: tuple[str, ...] = ("id", "created_at")
+
+# --- Rollback of external routing from Praxis back to OGX ---
+#
+# The strategy proposes a flag on the DataScienceCluster or on the OGXServer CR
+# but does not define one, and no such field has shipped. Until it does, the
+# rollback test has no documented procedure to drive and skips.
+#
+# When the mechanism ships, replace `None` with the JSON merge patch that reverts
+# external routing to OGX, for example `{"spec": {"praxisMode": {"enabled": False}}}`.
+# That single change is all the test needs, provided the mechanism lands on the
+# OGXServer CR; should it land on the DataScienceCluster instead, the resource
+# the `configured_rollback_patch` fixture patches has to change with it.
+OGX_SERVER_ROLLBACK_PATCH: dict[str, Any] | None = None
+
+# Service the OGX operator creates for an OGXServer: `<ogxserver-name>-service`.
+# It is the backend the migrated API paths must point at again after a rollback.
+OGX_SERVICE_NAME_SUFFIX: str = "-service"
+
+# Bound on the poll of `POST /v1/responses` through the unchanged external
+# hostname after the rollback is triggered: the first HTTP 200 must arrive within
+# five minutes, sampled every fifteen seconds.
+ROLLBACK_RESPONSES_TIMEOUT: int = 300
+ROLLBACK_POLL_INTERVAL: int = 15
+
+# Probe sent by that poll. It is deliberately unstored, so that polling does not
+# change the response count the state inventory compares across the rollback.
+ROLLBACK_PROBE_MARKER: str = "praxis-rollback-probe"
+ROLLBACK_PROBE_MAX_OUTPUT_TOKENS: int = 16
+
+# Section of the shared baseline ConfigMap holding the pre-rollback state inventory.
+ROLLBACK_INVENTORY_CONFIG_MAP_KEY: str = "rollback_inventory"
+
+# Upper bound on the rows an inventory listing walks. Reached only when the
+# distribution holds far more state than these tests create, which would make the
+# counts meaningless rather than merely slow, so it fails instead of truncating.
+MAX_LISTED_RESOURCES: int = 1000
