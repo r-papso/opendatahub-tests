@@ -135,7 +135,9 @@ class TestPraxisEmbeddingsRouting:
         the backend publishes for the configured model, the echoed model matches the requested one,
         the batch response carries exactly two indexed objects and prompt tokens are accounted for.
         """
-        serving_pods = serving_pods_for_path(client=admin_client, http_route=embeddings_http_route)
+        serving_pods = serving_pods_for_path(
+            client=admin_client, http_route=embeddings_http_route, path=EMBEDDINGS_API_PATH
+        )
         ogx_pod_keys = {
             (pod.namespace, pod.name) for pod in Pod.get(client=admin_client, label_selector=OGX_CORE_POD_FILTER)
         }
