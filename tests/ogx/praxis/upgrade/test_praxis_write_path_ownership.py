@@ -5,19 +5,11 @@ must land in exactly one of the two state stores: in both it is a dual write,
 in neither it was never persisted at all.
 
 The test creates a file, a vector store, a conversation and a response through
-the public API, then reads both PostgreSQL databases directly and asserts that
+the external Gateway hostname Praxis serves -- the OGX Route would bypass the
+write path under test -- then reads both PostgreSQL databases directly and asserts that
 exactly one of them holds each new id. Which of the two owns a given resource
-type is deliberately not asserted: the strategy still lists that as TBD, so the
-test pins the invariant rather than the current answer. Both instances are the
-ones the Praxis database-migration suite brings up, so this module reuses that
-suite's namespace and OGXServer parameters; it has no pre-upgrade phase of its
-own.
-
-Not covered: the audit-log half of the test case, which asks that each id appear
-in write operations against exactly one backend. This repository has no
-audit-log collection harness, and an assertion over data that is never collected
-would pass no matter how the write path behaved, so the direct state-store check
-is implemented instead.
+type is deliberately not asserted: the test pins the invariant rather than the
+current answer.
 """
 
 from typing import Any
@@ -75,7 +67,7 @@ class TestPraxisWritePathOwnership:
     @pytest.mark.post_upgrade
     def test_resources_written_to_single_backend(
         self,
-        ogx_client: OgxClient,
+        praxis_client: OgxClient,
         ogx_models: ModelInfo,
         ogx_postgres_pod: Pod,
         praxis_postgres_pod: Pod,
@@ -90,10 +82,10 @@ class TestPraxisWritePathOwnership:
             attachment reaches 'completed', and each id is found in exactly one of the
             two databases -- never in both, never in neither.
         """
-        file_id = seed_files(ogx_client=ogx_client, count=1)[0]
+        file_id = seed_files(ogx_client=praxis_client, count=1)[0]
         assert file_id, "Creating a file returned an empty id"
 
-        vector_store = ogx_client.vector_stores.create(
+        vector_store = praxis_client.vector_stores.create(
             name=f"{SEED_MARKER}-write-path",
             extra_body={
                 "embedding_model": ogx_models.embedding_model.id,
@@ -104,7 +96,7 @@ class TestPraxisWritePathOwnership:
         assert vector_store.id, "Creating a vector store returned an empty id"
 
         vector_store_file = vector_store_create_and_poll(
-            ogx_client=ogx_client,
+            ogx_client=praxis_client,
             vector_store_id=vector_store.id,
             file_id=file_id,
         )
@@ -113,11 +105,11 @@ class TestPraxisWritePathOwnership:
             f"status={vector_store_file.status!r}, last_error={vector_store_file.last_error!r}"
         )
 
-        conversation_id = seed_conversations(ogx_client=ogx_client, count=1)[0]
+        conversation_id = seed_conversations(ogx_client=praxis_client, count=1)[0]
         assert conversation_id, "Creating a conversation returned an empty id"
 
         response_id = seed_responses(
-            ogx_client=ogx_client,
+            ogx_client=praxis_client,
             model_id=ogx_models.model_id,
             count=1,
             conversation_id=conversation_id,
