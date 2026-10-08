@@ -10,9 +10,8 @@ MODELS_API_PATH: str = "/v1/models"
 FILES_API_PATH: str = "/v1/files"
 VECTOR_STORES_API_PATH: str = "/v1/vector_stores"
 
-# Timeouts for requests sent through the external Gateway hostname.
+# Timeout for requests sent through the external Gateway hostname.
 REQUEST_TIMEOUT_SECONDS: int = 120
-PROBE_TIMEOUT_SECONDS: int = 30
 
 # Parameters for the namespace the tests deploy into.
 NAMESPACE_PARAMS: dict[str, Any] = {"name": "test-ogx-to-praxis"}

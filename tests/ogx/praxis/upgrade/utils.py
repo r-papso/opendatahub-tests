@@ -11,13 +11,11 @@ asserted without either OGX or Praxis serving traffic.
 """
 
 import json
-import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Any, TypedDict
 from urllib.parse import quote
 
-import httpx
 import structlog
 from kubernetes.dynamic import DynamicClient
 from kubernetes.dynamic.exceptions import ResourceNotFoundError
@@ -25,10 +23,8 @@ from ocp_resources.config_map import ConfigMap
 from ocp_resources.job import Job
 from ocp_resources.pod import Pod
 from ogx_client import APIStatusError, OgxClient
-from timeout_sampler import TimeoutExpiredError, TimeoutSampler
 
-from tests.ogx.constants import OGX_CLIENT_VERIFY_SSL, POSTGRESQL_PASSWORD, POSTGRESQL_USER
-from tests.ogx.praxis.constants import PROBE_TIMEOUT_SECONDS
+from tests.ogx.constants import POSTGRESQL_PASSWORD, POSTGRESQL_USER
 from tests.ogx.praxis.upgrade.constants import (
     API_BASELINE_CONFIG_MAP_NAME,
     COMPARED_CONVERSATION_FIELDS,
@@ -529,6 +525,17 @@ class StateInventory(TypedDict):
     missing: list[str]
 
 
+class RollbackBaseline(TypedDict):
+    """Pre-rollback state inventory, together with the URL it was captured through.
+
+    `external_url` is recorded so the post-rollback run can show it addressed the
+    same hostname, rather than one the rollback moved the endpoint to.
+    """
+
+    inventory: StateInventory
+    external_url: str
+
+
 def capture_state_inventory(ogx_client: OgxClient, sampled_ids: dict[str, list[str]]) -> StateInventory:
     """Count the stored resources and read back the sampled ones.
 
@@ -573,50 +580,19 @@ def capture_state_inventory(ogx_client: OgxClient, sampled_ids: dict[str, list[s
     return StateInventory(counts=counts, sampled=sampled, missing=missing)
 
 
-def first_successful_response(
-    url: str,
-    headers: dict[str, str],
-    payload: dict[str, Any],
-    timeout: int,
-    interval: int,
-) -> tuple[dict[str, Any], float]:
-    """Poll `POST url` until it answers HTTP 200, within a bounded window.
+def sampled_resource_ids(inventory: StateInventory) -> dict[str, list[str]]:
+    """Return the ids an inventory sampled, keyed by resource kind.
 
-    The probe is sent with plain HTTP rather than through the API client so that
-    a non-200 answer is a sample to retry rather than a raised exception, and so
-    that the first success can be timed.
+    Lets a later capture re-read exactly the resources an earlier one recorded,
+    without the ids having to be carried separately.
 
     Args:
-        url: Absolute URL of the endpoint, on the external hostname under test.
-        headers: Request headers, including authorization.
-        payload: JSON request body.
-        timeout: Longest the endpoint may take to answer HTTP 200, in seconds.
-        interval: Delay between consecutive probes, in seconds.
+        inventory: A previously captured inventory.
 
     Returns:
-        The decoded body of the first successful answer, and the seconds elapsed
-        between the first probe and that answer.
-
-    Raises:
-        TimeoutExpiredError: If no probe answered HTTP 200 within `timeout`.
+        The sampled ids, in the shape `capture_state_inventory` expects.
     """
-    start = time.monotonic()
-    with httpx.Client(verify=OGX_CLIENT_VERIFY_SSL, timeout=PROBE_TIMEOUT_SECONDS) as http_client:
-        for response in TimeoutSampler(
-            wait_timeout=timeout,
-            sleep=interval,
-            func=http_client.post,
-            exceptions_dict={httpx.HTTPError: []},
-            url=url,
-            headers=headers,
-            json=payload,
-        ):
-            if response.status_code == httpx.codes.OK:
-                elapsed = time.monotonic() - start
-                LOGGER.info(f"POST {url} answered HTTP 200 after {elapsed:.1f}s")
-                return dict(response.json()), elapsed
-            LOGGER.info(f"POST {url} answered HTTP {response.status_code}; retrying")
-    raise TimeoutExpiredError(value=f"POST {url} never answered HTTP 200", elapsed_time=time.monotonic() - start)
+    return {kind: list(sampled) for kind, sampled in inventory["sampled"].items()}
 
 
 def format_field_diff(resource: str, resource_id: str, before: dict[str, str], after: dict[str, str]) -> str:

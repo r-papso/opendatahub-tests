@@ -1,6 +1,6 @@
 """Constants for the OGX -> Praxis database migration tests."""
 
-from typing import Any, Literal
+from typing import Literal
 
 # Source (OGX) tables. Both live in the OGX PostgreSQL database deployed by the
 # `postgres_deployment` fixture. The names come from the built-in config of the
@@ -99,31 +99,18 @@ COMPARED_CONVERSATION_FIELDS: tuple[str, ...] = ("id", "created_at")
 
 # --- Rollback of external routing from Praxis back to OGX ---
 #
-# The strategy proposes a flag on the DataScienceCluster or on the OGXServer CR
-# but does not define one, and no such field has shipped. Until it does, the
-# rollback test has no documented procedure to drive and skips.
-#
-# When the mechanism ships, replace `None` with the JSON merge patch that reverts
-# external routing to OGX, for example `{"spec": {"praxisMode": {"enabled": False}}}`.
-# That single change is all the test needs, provided the mechanism lands on the
-# OGXServer CR; should it land on the DataScienceCluster instead, the resource
-# the `configured_rollback_patch` fixture patches has to change with it.
-OGX_SERVER_ROLLBACK_PATCH: dict[str, Any] | None = None
+# The rollback procedure itself is applied to the test environment between the
+# pre- and post-rollback runs, the same way the upgrade is, so nothing here
+# describes how it is triggered.
 
 # Service the OGX operator creates for an OGXServer: `<ogxserver-name>-service`.
-# It is the backend the migrated API paths must point at again after a rollback.
+# Its pods are the ones whose logs must show the post-rollback request.
 OGX_SERVICE_NAME_SUFFIX: str = "-service"
 
-# Bound on the poll of `POST /v1/responses` through the unchanged external
-# hostname after the rollback is triggered: the first HTTP 200 must arrive within
-# five minutes, sampled every fifteen seconds.
-ROLLBACK_RESPONSES_TIMEOUT: int = 300
-ROLLBACK_POLL_INTERVAL: int = 15
-
-# Probe sent by that poll. It is deliberately unstored, so that polling does not
-# change the response count the state inventory compares across the rollback.
+# Response created through the external hostname after the rollback, to be
+# correlated against the OGX pod logs. It is deliberately unstored, so that
+# probing does not change the response count the state inventory compares.
 ROLLBACK_PROBE_MARKER: str = "praxis-rollback-probe"
-ROLLBACK_PROBE_MAX_OUTPUT_TOKENS: int = 16
 
 # Section of the shared baseline ConfigMap holding the pre-rollback state inventory.
 ROLLBACK_INVENTORY_CONFIG_MAP_KEY: str = "rollback_inventory"
