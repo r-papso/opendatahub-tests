@@ -24,9 +24,11 @@ from tests.ogx.praxis.upgrade.constants import (
     OGX_POSTGRES_DATABASE,
     PRAXIS_POSTGRES_DATABASE,
     SEED_MARKER,
+    SOURCE_CONVERSATIONS_TABLE,
     SOURCE_FILES_TABLE,
     SOURCE_RESPONSES_TABLE,
     SOURCE_VECTOR_STORES_TABLE,
+    TARGET_CONVERSATIONS_TABLE,
     TARGET_FILES_TABLE,
     TARGET_RESPONSES_TABLE,
     TARGET_VECTOR_STORES_TABLE,
@@ -121,6 +123,7 @@ class TestPraxisWritePathOwnership:
         ownership_checks = (
             ("File", file_id, SOURCE_FILES_TABLE, TARGET_FILES_TABLE, "id"),
             ("Vector store", vector_store.id, SOURCE_VECTOR_STORES_TABLE, TARGET_VECTOR_STORES_TABLE, "id"),
+            ("Conversation", conversation_id, SOURCE_CONVERSATIONS_TABLE, TARGET_CONVERSATIONS_TABLE, "id"),
             ("Response", response_id, SOURCE_RESPONSES_TABLE, TARGET_RESPONSES_TABLE, "id"),
         )
 
