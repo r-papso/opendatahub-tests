@@ -15,18 +15,20 @@ from http import HTTPStatus
 import pytest
 import requests
 import structlog
+from kubernetes.dynamic import DynamicClient
 
 from tests.ogx.praxis.constants import (
     NAMESPACE_PARAMS,
     PRAXIS_MODE_OGX_SERVER_PARAMS,
     REQUEST_TIMEOUT_SECONDS,
 )
+from utilities.infra import get_openshift_token
 from utilities.resources.ogx_server import OgxServer
 
 LOGGER = structlog.get_logger(name=__name__)
 
-# Credentials for the second tenant. The suite's own admin token provides tenant A; a distinct
-# token for tenant B cannot be minted generically, so it is supplied by the environment.
+# Credentials for the second tenant. The suite's unprivileged user provides tenant A; a second
+# non-admin token cannot be minted generically, so tenant B is supplied by the environment.
 TENANT_B_TOKEN_ENV_VAR: str = "OGX_PRAXIS_TENANT_B_TOKEN"
 
 # Statuses that correctly deny a cross-tenant read. HTTP 200 is always a leak.
@@ -105,13 +107,23 @@ def assert_cross_tenant_denied(response: requests.Response, resource: str) -> No
 
 
 @pytest.fixture(scope="class")
-def tenant_b_token() -> str:
-    """Bearer token of the second tenant, skipping when it is not configured."""
+def tenant_b_token(use_unprivileged_client: bool, unprivileged_client: DynamicClient) -> str:
+    """Bearer token of the second tenant, skipping when two distinct non-admin identities are unavailable."""
+    if not use_unprivileged_client:
+        pytest.skip(
+            "Unprivileged client is disabled, so tenant A would be the cluster administrator, who may legitimately "
+            "read both tenants; run with --use-unprivileged-client so tenant isolation is actually exercised"
+        )
     token = os.getenv(TENANT_B_TOKEN_ENV_VAR, "")
     if not token:
         pytest.skip(
             f"Second tenant credentials are not configured; set {TENANT_B_TOKEN_ENV_VAR} to a bearer token for a "
             "tenant distinct from the one the test suite authenticates as, so cross-tenant access can be attempted"
+        )
+    if token == get_openshift_token(client=unprivileged_client):
+        pytest.skip(
+            f"{TENANT_B_TOKEN_ENV_VAR} holds the same token as tenant A; the two tenants must be distinct non-admin "
+            "users for the isolation assertions to mean anything"
         )
     return token
 
