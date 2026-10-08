@@ -1,5 +1,6 @@
 """Constants shared by the OGX -> Praxis migration tests."""
 
+
 from typing import Any
 
 # Paths of the OpenAI-compatible APIs, as declared by the Gateway API routes
@@ -31,6 +32,7 @@ OGX_SERVER_PARAMS: dict[str, Any] = {
     "vector_io_provider": "pgvector",
     "files_provider": "local",
 }
+
 
 # Parameters for an OGXServer in Praxis-fronted internal-only mode. External access is
 # requested on purpose: in Praxis mode the operator must not honor it.
