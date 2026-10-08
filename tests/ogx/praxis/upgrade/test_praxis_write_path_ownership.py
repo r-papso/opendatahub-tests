@@ -12,14 +12,13 @@ type is deliberately not asserted: the test pins the invariant rather than the
 current answer.
 """
 
-from typing import Any
-
 import pytest
 import structlog
 from ocp_resources.pod import Pod
 from ogx_client import OgxClient
 
 from tests.ogx.constants import ModelInfo
+from tests.ogx.praxis.constants import NAMESPACE_PARAMS, OGX_SERVER_PARAMS
 from tests.ogx.praxis.upgrade.constants import (
     OGX_POSTGRES_DATABASE,
     PRAXIS_POSTGRES_DATABASE,
@@ -43,19 +42,16 @@ from tests.ogx.utils import vector_store_create_and_poll
 
 LOGGER = structlog.get_logger(name=__name__)
 
-# Mirrors the Praxis database-migration suite: that suite's pre-upgrade phase
-# deploys both the OGX and the Praxis PostgreSQL instances this test reads, and
-# the fixtures resolve them inside the namespace they were created in.
-NAMESPACE_PARAMS = {"name": "test-ogx-praxis-db-migration"}
-OGX_SERVER_PARAMS: dict[str, Any] = {"vector_io_provider": "pgvector", "files_provider": "local"}
-
-# Must match `vector_io_provider` above: the vector store is created explicitly
-# rather than through the shared `vector_store` fixture, because that fixture
-# reuses the pre-upgrade store, while this test needs a store written after the
-# upgrade.
+# Must match `vector_io_provider` in the shared `OGX_SERVER_PARAMS`: the vector
+# store is created explicitly rather than through the shared `vector_store`
+# fixture, because that fixture reuses the pre-upgrade store, while this test
+# needs a store written after the upgrade.
 VECTOR_IO_PROVIDER: str = "pgvector"
 
 
+# The shared upgrade environment, which the Praxis database-migration suite deploys
+# both PostgreSQL instances into during its pre-upgrade phase. This test is
+# post-upgrade only and reads them, so it must resolve the same namespace.
 @pytest.mark.parametrize(
     "unprivileged_model_namespace, ogx_server",
     [pytest.param(NAMESPACE_PARAMS, OGX_SERVER_PARAMS)],
