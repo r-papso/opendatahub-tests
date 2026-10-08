@@ -11,9 +11,6 @@ afterwards, so a rollback that only works because the client was reconfigured
 cannot pass.
 """
 
-from collections.abc import Generator
-
-import httpx
 import pytest
 import structlog
 from kubernetes.dynamic import DynamicClient
@@ -23,12 +20,10 @@ from ocp_resources.pod import Pod
 from ocp_resources.service import Service
 from ogx_client import OgxClient
 
-from tests.ogx.constants import OGX_CLIENT_VERIFY_SSL, ModelInfo
+from tests.ogx.constants import ModelInfo
 from tests.ogx.praxis.constants import (
     NAMESPACE_PARAMS,
     OGX_SERVER_PARAMS,
-    REQUEST_TIMEOUT_SECONDS,
-    RESPONSES_API_PATH,
 )
 from tests.ogx.praxis.upgrade.constants import (
     MAX_LISTED_RESOURCES,
@@ -51,62 +46,10 @@ from tests.ogx.praxis.upgrade.utils import (
     seed_files,
     seed_responses,
 )
-from tests.ogx.praxis.utils import (
-    gateway_base_url,
-    http_routes_matching_path,
-    pods_for_service,
-    pods_logging_marker,
-)
-from utilities.exceptions import UnexpectedResourceCountError
-from utilities.infra import get_openshift_token
-from utilities.resources.http_route import HTTPRoute
+from tests.ogx.praxis.utils import pods_for_service, pods_logging_marker
 from utilities.resources.ogx_server import OgxServer
 
 LOGGER = structlog.get_logger(name=__name__)
-
-
-@pytest.fixture(scope="class")
-def responses_http_route(admin_client: DynamicClient) -> HTTPRoute:
-    """The single HTTPRoute that owns `POST /v1/responses` on the external Gateway."""
-    http_routes = http_routes_matching_path(client=admin_client, path=RESPONSES_API_PATH)
-    if not http_routes:
-        pytest.skip(
-            f"No HTTPRoute declares {RESPONSES_API_PATH}; the cluster does not expose the "
-            "Responses API through the Gateway, so there is no external routing to roll back"
-        )
-    if len(http_routes) != 1:
-        raise UnexpectedResourceCountError(
-            f"Expected exactly 1 HTTPRoute declaring {RESPONSES_API_PATH}, found "
-            f"{[f'{route.namespace}/{route.name}' for route in http_routes]}"
-        )
-    return http_routes[0]
-
-
-@pytest.fixture(scope="class")
-def external_responses_url(responses_http_route: HTTPRoute) -> str:
-    """The external URL of `/v1/responses`, as a client outside the cluster addresses it."""
-    return f"{gateway_base_url(http_route=responses_http_route)}{RESPONSES_API_PATH}"
-
-
-@pytest.fixture(scope="class")
-def gateway_ogx_client(admin_client: DynamicClient, responses_http_route: HTTPRoute) -> Generator[OgxClient]:
-    """Client bound to the external Gateway hostname, not to the OGX Route.
-
-    The shared `ogx_client` addresses the OGX Service directly, so it would reach
-    OGX whatever the external routing does; this test needs the hostname whose
-    routing the rollback changes.
-    """
-    http_client = httpx.Client(verify=OGX_CLIENT_VERIFY_SSL, timeout=REQUEST_TIMEOUT_SECONDS)
-    try:
-        yield OgxClient(
-            base_url=gateway_base_url(http_route=responses_http_route),
-            default_headers={"Authorization": f"Bearer {get_openshift_token(client=admin_client)}"},
-            http_client=http_client,
-            timeout=REQUEST_TIMEOUT_SECONDS,
-            max_retries=0,
-        )
-    finally:
-        http_client.close()
 
 
 @pytest.fixture(scope="class")
@@ -147,8 +90,8 @@ class TestPreRollbackFromPraxisToOgx:
         unprivileged_client: DynamicClient,
         unprivileged_model_namespace: Namespace,
         ogx_server: OgxServer,
-        external_responses_url: str,
-        gateway_ogx_client: OgxClient,
+        praxis_responses_url: str,
+        praxis_client: OgxClient,
         ogx_models: ModelInfo,
     ) -> None:
         """Capture the state inventory the rollback has to leave intact.
@@ -162,15 +105,15 @@ class TestPreRollbackFromPraxisToOgx:
         # State is seeded rather than discovered so that the inventory comparison
         # has something to lose; comparing empty counts would pass whatever the
         # rollback did.
-        conversation_ids = seed_conversations(ogx_client=gateway_ogx_client, count=SEED_CONVERSATIONS_COUNT)
+        conversation_ids = seed_conversations(ogx_client=praxis_client, count=SEED_CONVERSATIONS_COUNT)
         # The vector store is left empty on purpose: an attached file would keep
         # its status moving while it is ingested, and status is a compared field.
-        vector_store = gateway_ogx_client.vector_stores.create(name=f"{SEED_MARKER}-rollback")
+        vector_store = praxis_client.vector_stores.create(name=f"{SEED_MARKER}-rollback")
         sampled_state_ids = {
-            "files": seed_files(ogx_client=gateway_ogx_client, count=SEED_FILES_COUNT),
+            "files": seed_files(ogx_client=praxis_client, count=SEED_FILES_COUNT),
             "vector_stores": [vector_store.id],
             "responses": seed_responses(
-                ogx_client=gateway_ogx_client,
+                ogx_client=praxis_client,
                 model_id=ogx_models.model_id,
                 count=SEED_RESPONSES_COUNT,
                 conversation_id=conversation_ids[0],
@@ -178,14 +121,14 @@ class TestPreRollbackFromPraxisToOgx:
             "conversations": conversation_ids,
         }
 
-        inventory = capture_state_inventory(ogx_client=gateway_ogx_client, sampled_ids=sampled_state_ids)
+        inventory = capture_state_inventory(ogx_client=praxis_client, sampled_ids=sampled_state_ids)
         assert not inventory["missing"], f"State sampled before the rollback does not resolve: {inventory['missing']}"
 
         save_baseline_section(
             client=unprivileged_client,
             namespace=unprivileged_model_namespace.name,
             section=ROLLBACK_INVENTORY_CONFIG_MAP_KEY,
-            payload=RollbackBaseline(inventory=inventory, external_url=external_responses_url),
+            payload=RollbackBaseline(inventory=inventory, external_url=praxis_responses_url),
         )
 
 
@@ -206,9 +149,9 @@ class TestPostRollbackFromPraxisToOgx:
         unprivileged_client: DynamicClient,
         unprivileged_model_namespace: Namespace,
         ogx_server: OgxServer,
-        external_responses_url: str,
+        praxis_responses_url: str,
         ogx_serving_pods: list[Pod],
-        gateway_ogx_client: OgxClient,
+        praxis_client: OgxClient,
         ogx_models: ModelInfo,
     ) -> None:
         """Verify that OGX serves the rolled-back endpoint and that no state was lost.
@@ -225,14 +168,14 @@ class TestPostRollbackFromPraxisToOgx:
             namespace=unprivileged_model_namespace.name,
             section=ROLLBACK_INVENTORY_CONFIG_MAP_KEY,
         )
-        assert external_responses_url == baseline["external_url"], (
+        assert praxis_responses_url == baseline["external_url"], (
             f"The external hostname changed across the rollback: it was {baseline['external_url']} before and is "
-            f"{external_responses_url} now, so the client would have had to be reconfigured"
+            f"{praxis_responses_url} now, so the client would have had to be reconfigured"
         )
 
         # Unstored on purpose, so that probing does not change the response count
         # the inventory compares.
-        probe = gateway_ogx_client.responses.create(
+        probe = praxis_client.responses.create(
             input=f"Reply with the single word '{ROLLBACK_PROBE_MARKER}'.",
             model=ogx_models.model_id,
             store=False,
@@ -243,14 +186,14 @@ class TestPostRollbackFromPraxisToOgx:
         # without the correlation there is no evidence of which workload answered.
         pods_serving_probe = pods_logging_marker(pods=ogx_serving_pods, marker=probe.id)
         assert pods_serving_probe, (
-            f"Response '{probe.id}' created through {external_responses_url} does not appear in the logs of the OGX "
+            f"Response '{probe.id}' created through {praxis_responses_url} does not appear in the logs of the OGX "
             f"pods {[pod.name for pod in ogx_serving_pods]}, so there is no evidence OGX rather than Praxis served it"
         )
         LOGGER.info(f"Response '{probe.id}' was served by OGX pods {pods_serving_probe}")
 
         recorded_inventory = baseline["inventory"]
         inventory_after = capture_state_inventory(
-            ogx_client=gateway_ogx_client,
+            ogx_client=praxis_client,
             sampled_ids=sampled_resource_ids(inventory=recorded_inventory),
         )
 
