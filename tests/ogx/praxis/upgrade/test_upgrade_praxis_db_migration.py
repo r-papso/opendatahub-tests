@@ -13,8 +13,6 @@ Both tests emit a JSON report with before/after row counts and the active
 embedding model, for retention as a CI artifact.
 """
 
-from typing import Any
-
 import pytest
 from kubernetes.dynamic import DynamicClient
 from ocp_resources.pod import Pod
@@ -22,6 +20,7 @@ from ocp_resources.secret import Secret
 from ogx_client import OgxClient
 
 from tests.ogx.constants import ModelInfo
+from tests.ogx.praxis.constants import NAMESPACE_PARAMS, OGX_SERVER_PARAMS
 from tests.ogx.praxis.upgrade.constants import (
     OGX_POSTGRES_DATABASE,
     PRAXIS_POSTGRES_DATABASE,
@@ -62,16 +61,6 @@ SOURCE_RESPONSES_QUERY = _responses_query(table_name=SOURCE_RESPONSES_TABLE)
 SOURCE_CONVERSATIONS_QUERY = _conversations_query(table_name=SOURCE_CONVERSATIONS_TABLE, id_column="id")
 TARGET_RESPONSES_QUERY = _responses_query(table_name=TARGET_RESPONSES_TABLE)
 TARGET_CONVERSATIONS_QUERY = _conversations_query(table_name=TARGET_CONVERSATIONS_TABLE, id_column="conversation_id")
-
-# Neither `spec.praxisMode` nor `spec.storage.sql` is set here: both belong to
-# the upgrade step. The operator creates the migration Job as soon as praxisMode
-# is present, which pre-upgrade would mean migrating the tables before this test
-# has seeded them, and setting `spec.storage` switches the server onto the
-# operator's generated config, replacing the storage section the distribution
-# derives from the POSTGRES_* environment (including moving the KV store to
-# sqlite, which the CRD cannot express as postgres).
-OGX_SERVER_PARAMS: dict[str, Any] = {"vector_io_provider": "faiss", "files_provider": "local"}
-NAMESPACE_PARAMS = {"name": "test-ogx-praxis-db-migration"}
 
 
 @pytest.mark.parametrize(
