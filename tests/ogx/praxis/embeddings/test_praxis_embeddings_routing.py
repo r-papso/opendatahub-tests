@@ -19,7 +19,7 @@ import structlog
 from kubernetes.dynamic import DynamicClient
 from ocp_resources.pod import Pod
 
-from tests.ogx.constants import OGX_CLIENT_VERIFY_SSL, OGX_CORE_EMBEDDING_MODEL, OGX_CORE_POD_FILTER
+from tests.ogx.constants import OGX_CORE_EMBEDDING_MODEL, OGX_CORE_POD_FILTER
 from tests.ogx.praxis.constants import (
     EMBEDDINGS_API_PATH,
     MODELS_API_PATH,
@@ -76,15 +76,15 @@ def embeddings_http_route(admin_client: DynamicClient) -> HTTPRoute:
 @pytest.fixture
 def embeddings_model_dimension(
     embeddings_http_route: HTTPRoute,
+    request_session: requests.Session,
     tenant_authorization_header: dict[str, str],
 ) -> int:
     """Output vector length the backend reports for the configured embedding model."""
     models_url = f"{gateway_base_url(http_route=embeddings_http_route)}{MODELS_API_PATH}"
-    response = requests.get(
+    response = request_session.get(
         url=models_url,
         headers=tenant_authorization_header,
         timeout=REQUEST_TIMEOUT_SECONDS,
-        verify=OGX_CLIENT_VERIFY_SSL,
     )
     if response.status_code != 200:
         pytest.skip(
@@ -124,6 +124,7 @@ class TestPraxisEmbeddingsRouting:
         admin_client: DynamicClient,
         embeddings_http_route: HTTPRoute,
         embeddings_model_dimension: int,
+        request_session: requests.Session,
         tenant_authorization_header: dict[str, str],
     ) -> None:
         """Verify the Embeddings API is routed by Praxis to the embedding backend.
@@ -150,12 +151,11 @@ class TestPraxisEmbeddingsRouting:
 
         embeddings_url = f"{gateway_base_url(http_route=embeddings_http_route)}{EMBEDDINGS_API_PATH}"
         LOGGER.info(f"POST {embeddings_url} with model {OGX_CORE_EMBEDDING_MODEL}")
-        single_response = requests.post(
+        single_response = request_session.post(
             url=embeddings_url,
             headers=tenant_authorization_header,
             json={"model": OGX_CORE_EMBEDDING_MODEL, "input": EMBEDDINGS_INPUT},
             timeout=REQUEST_TIMEOUT_SECONDS,
-            verify=OGX_CLIENT_VERIFY_SSL,
         )
         assert single_response.status_code == 200, (
             f"POST {EMBEDDINGS_API_PATH} returned HTTP {single_response.status_code}: {single_response.text[:200]}"
@@ -175,12 +175,11 @@ class TestPraxisEmbeddingsRouting:
             f"Embeddings response reports no prompt tokens: {single_body.get('usage')}"
         )
 
-        batch_response = requests.post(
+        batch_response = request_session.post(
             url=embeddings_url,
             headers=tenant_authorization_header,
             json={"model": OGX_CORE_EMBEDDING_MODEL, "input": EMBEDDINGS_BATCH_INPUT},
             timeout=REQUEST_TIMEOUT_SECONDS,
-            verify=OGX_CLIENT_VERIFY_SSL,
         )
         assert batch_response.status_code == 200, (
             f"Batch POST {EMBEDDINGS_API_PATH} returned HTTP {batch_response.status_code}: {batch_response.text[:200]}"
