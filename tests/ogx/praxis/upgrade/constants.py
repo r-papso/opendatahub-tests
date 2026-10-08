@@ -70,14 +70,16 @@ SEED_FILES_COUNT: int = 3
 # to `FilesResource.create(purpose=...)`.
 SEED_FILE_PURPOSE: Literal["assistants"] = "assistants"
 
-# ConfigMap carrying the pre-upgrade Files/Vector Stores API responses into the
-# post-upgrade run, following the pattern used by the MaaS upgrade tests.
+# ConfigMap carrying the pre-upgrade API baselines into the post-upgrade run,
+# following the pattern used by the MaaS upgrade tests. Each pre-upgrade test
+# writes its own section key, so tests sharing a namespace do not overwrite each
+# other's baseline.
 API_BASELINE_CONFIG_MAP_NAME: str = "praxis-upgrade-api-baseline"
-API_BASELINE_CONFIG_MAP_KEY: str = "api_baseline"
 
-# Section of the same ConfigMap holding the file_search citation inputs. Each
-# pre-upgrade test writes its own key, so tests sharing a namespace do not
-# overwrite each other's baseline.
+# Section holding the Files and Vector Stores responses recorded before the upgrade.
+FILES_AND_VECTOR_STORES_CONFIG_MAP_KEY: str = "files_and_vector_stores"
+
+# Section holding the file_search citation inputs.
 FILE_SEARCH_CITATIONS_CONFIG_MAP_KEY: str = "file_search_citations"
 
 # Inputs for the file_search citation test. The question is answered by the
