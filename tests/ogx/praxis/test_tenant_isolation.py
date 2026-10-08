@@ -122,7 +122,7 @@ def tenant_b_headers(tenant_b_token: str) -> dict[str, str]:
     return authorization_header(token=tenant_b_token)
 
 
-@pytest.fixture(scope="class")
+@pytest.fixture
 def tenant_a_file_id(
     request_session: requests.Session,
     tenant_authorization_header: dict[str, str],
@@ -138,7 +138,7 @@ def tenant_a_file_id(
     )
 
 
-@pytest.fixture(scope="class")
+@pytest.fixture
 def tenant_b_file_id(
     request_session: requests.Session,
     tenant_b_headers: dict[str, str],
@@ -154,7 +154,7 @@ def tenant_b_file_id(
     )
 
 
-@pytest.fixture(scope="class")
+@pytest.fixture
 def tenant_b_vector_store_id(
     request_session: requests.Session,
     tenant_b_headers: dict[str, str],
@@ -174,7 +174,7 @@ def tenant_b_vector_store_id(
     return str(response.json()["id"])
 
 
-@pytest.fixture(scope="class")
+@pytest.fixture
 def tenant_b_conversation_id(
     request_session: requests.Session,
     tenant_b_headers: dict[str, str],
