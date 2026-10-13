@@ -20,45 +20,17 @@ from kubernetes.dynamic import DynamicClient
 from ocp_resources.pod import Pod
 
 from tests.ogx.constants import OGX_CORE_EMBEDDING_MODEL, OGX_CORE_POD_FILTER
-from tests.ogx.praxis.constants import (
-    EMBEDDINGS_API_PATH,
-    MODELS_API_PATH,
-    REQUEST_TIMEOUT_SECONDS,
-)
+from tests.ogx.praxis.constants import EMBEDDINGS_API_PATH, REQUEST_TIMEOUT_SECONDS
 from tests.ogx.praxis.utils import gateway_base_url, http_routes_matching_path, serving_pods_for_path
 from utilities.resources.http_route import HTTPRoute
 
 LOGGER = structlog.get_logger(name=__name__)
-
-# Key under which the embedding backends report the output vector length in the
-# model metadata returned by `GET /v1/models`.
-EMBEDDING_DIMENSION_KEY: Final[str] = "embedding_dimension"
-
-# Metadata fields of a model entry, in the order they are looked up. OGX reports
-# `custom_metadata`; the OpenAI-compatible shape uses `metadata`.
-MODEL_METADATA_KEYS: Final[tuple[str, ...]] = ("custom_metadata", "metadata")
 
 EMBEDDINGS_INPUT: Final[str] = "quarterly migration readiness review"
 EMBEDDINGS_BATCH_INPUT: Final[list[str]] = [
     "quarterly migration readiness review",
     "greenfield deployment acceptance criteria",
 ]
-
-
-def _model_metadata(model_entry: dict[str, Any]) -> dict[str, Any]:
-    """Return the metadata mapping of a `GET /v1/models` entry.
-
-    Args:
-        model_entry: One element of the models listing.
-
-    Returns:
-        The first metadata mapping present on the entry, or an empty mapping.
-    """
-    for metadata_key in MODEL_METADATA_KEYS:
-        metadata = model_entry.get(metadata_key)
-        if isinstance(metadata, dict):
-            return metadata
-    return {}
 
 
 @pytest.fixture
