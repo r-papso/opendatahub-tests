@@ -1,19 +1,14 @@
-"""TC-E2E-005: file_search citations after the OGX -> Praxis upgrade.
+"""TC-E2E-005: file_search citations after an OGX -> Praxis migration.
 
-The pre-upgrade class records the id of the vector store the `vector_store`
-fixture ingested the dataset into, together with the ids of its files. The
-post-upgrade test takes both from that baseline and asks a question answered by
-that corpus through `POST /v1/responses` with the file_search tool, and checks
-that the citations still reference those pre-upgrade file ids.
-
-The post-upgrade request goes through the external Gateway hostname Praxis
-serves, so the retrieval path that has to keep working after the upgrade is the
-one actually exercised.
+The module ingests a dataset into OGX, records the vector store and attached
+file ids, and then enables Praxis mode to run the migration. The post-migration
+request goes through the external Gateway hostname Praxis serves and verifies
+that file_search citations still reference the files ingested through OGX.
 """
 
+from collections.abc import Callable
+
 import pytest
-from kubernetes.dynamic import DynamicClient
-from ocp_resources.namespace import Namespace
 from ogx_client import OgxClient
 from ogx_client.types import ResponseObject
 from ogx_client.types.vector_store import VectorStore
@@ -25,13 +20,9 @@ from tests.ogx.praxis.upgrade.constants import (
     CITATION_INSTRUCTIONS,
     CITATION_MAX_OUTPUT_TOKENS,
     CITATION_QUESTION,
-    FILE_SEARCH_CITATIONS_CONFIG_MAP_KEY,
 )
-from tests.ogx.praxis.upgrade.utils import (
-    FileSearchCitationBaseline,
-    load_baseline_section,
-    save_baseline_section,
-)
+from tests.ogx.praxis.upgrade.utils import FileSearchCitationBaseline
+from utilities.resources.ogx_server import OgxServer
 
 
 def _cited_file_ids(response: ResponseObject) -> set[str]:
@@ -54,6 +45,24 @@ def _cited_file_ids(response: ResponseObject) -> set[str]:
     }
 
 
+@pytest.fixture(scope="class")
+def file_search_citations_baseline(
+    ogx_client: OgxClient,
+    vector_store: VectorStore,
+    praxis_migration_runner: Callable[[], OgxServer],
+) -> FileSearchCitationBaseline:
+    """Record OGX file ids and run the Praxis migration once."""
+    file_ids = [
+        vector_store_file.id
+        for vector_store_file in ogx_client.vector_stores.files.list(vector_store_id=vector_store.id).data
+    ]
+    assert file_ids, f"Vector store {vector_store.id} has no attached files to cite after migration"
+
+    baseline: FileSearchCitationBaseline = {"vector_store_id": vector_store.id, "file_ids": file_ids}
+    praxis_migration_runner()
+    return baseline
+
+
 @pytest.mark.parametrize(
     "unprivileged_model_namespace, ogx_server, vector_store",
     [
@@ -67,79 +76,24 @@ def _cited_file_ids(response: ResponseObject) -> set[str]:
 )
 @pytest.mark.ogx
 @pytest.mark.rag
-class TestPreUpgradeFileSearchCitations:
-    @pytest.mark.pre_upgrade
-    def test_record_file_search_citation_baseline(
+class TestFileSearchCitationsMigration:
+    def test_file_search_citations_reference_migrated_files(
         self,
-        unprivileged_client: DynamicClient,
-        unprivileged_model_namespace: Namespace,
-        ogx_client: OgxClient,
-        vector_store: VectorStore,
-    ) -> None:
-        """Record the ids of the files whose citations are verified after the upgrade.
-
-        Given: An OGX distribution before the upgrade, with the dataset ingested
-            into a vector store.
-        When: The attached file ids are read back and persisted to the baseline
-            ConfigMap.
-        Then: The vector store holds at least one file and the persisted
-            baseline reads back unchanged.
-        """
-        file_ids = [
-            vector_store_file.id
-            for vector_store_file in ogx_client.vector_stores.files.list(vector_store_id=vector_store.id).data
-        ]
-        assert file_ids, f"Vector store {vector_store.id} has no attached files to cite after the upgrade"
-
-        citations: FileSearchCitationBaseline = {"vector_store_id": vector_store.id, "file_ids": file_ids}
-        save_baseline_section(
-            client=unprivileged_client,
-            namespace=unprivileged_model_namespace.name,
-            section=FILE_SEARCH_CITATIONS_CONFIG_MAP_KEY,
-            payload=citations,
-        )
-        persisted: FileSearchCitationBaseline = load_baseline_section(
-            client=unprivileged_client,
-            namespace=unprivileged_model_namespace.name,
-            section=FILE_SEARCH_CITATIONS_CONFIG_MAP_KEY,
-        )
-        assert persisted == citations, f"Persisted citation baseline {persisted} differs from the recorded {citations}"
-
-
-@pytest.mark.parametrize(
-    "unprivileged_model_namespace, ogx_server",
-    [
-        pytest.param(NAMESPACE_PARAMS, OGX_SERVER_PARAMS),
-    ],
-    indirect=True,
-)
-@pytest.mark.ogx
-@pytest.mark.rag
-class TestPostUpgradeFileSearchCitations:
-    @pytest.mark.post_upgrade
-    def test_file_search_citations_reference_pre_upgrade_files(
-        self,
-        unprivileged_client: DynamicClient,
-        unprivileged_model_namespace: Namespace,
+        file_search_citations_baseline: FileSearchCitationBaseline,
         praxis_client: OgxClient,
         ogx_models: ModelInfo,
     ) -> None:
-        """Verify file_search citations still reference the pre-upgrade files.
+        """Verify file_search citations still reference the migrated OGX files.
 
-        Given: A cluster upgraded with Praxis fronting OGX, and a vector store
-            whose files were ingested and recorded before the upgrade.
+        Given: A vector store whose files were ingested through OGX and migrated
+            to Praxis.
         When: A question answered by those files is asked through
             `POST /v1/responses` with the file_search tool.
-        Then: The pre-upgrade vector store is still served through Praxis, the
+        Then: The migrated vector store is served through Praxis, the
             response carries file_citation annotations, and every cited file id
-            is one recorded before the upgrade.
+            is one recorded before migration.
         """
-        citations: FileSearchCitationBaseline = load_baseline_section(
-            client=unprivileged_client,
-            namespace=unprivileged_model_namespace.name,
-            section=FILE_SEARCH_CITATIONS_CONFIG_MAP_KEY,
-        )
-        baseline_vector_store_id = citations["vector_store_id"]
+        baseline_vector_store_id = file_search_citations_baseline["vector_store_id"]
         vector_store = praxis_client.vector_stores.retrieve(vector_store_id=baseline_vector_store_id)
         assert vector_store.id == baseline_vector_store_id, (
             f"Retrieving vector store {baseline_vector_store_id} through Praxis returned {vector_store.id}"
@@ -159,12 +113,12 @@ class TestPostUpgradeFileSearchCitations:
 
         cited_file_ids = _cited_file_ids(response=response)
         assert cited_file_ids, (
-            "Expected at least one file_citation annotation after the upgrade; response output types: "
+            "Expected at least one file_citation annotation after migration; response output types: "
             f"{[output_item.type for output_item in response.output]}"
         )
 
-        pre_upgrade_file_ids = set(citations["file_ids"])
-        assert cited_file_ids <= pre_upgrade_file_ids, (
-            "Citations reference file ids that did not exist before the upgrade: "
-            f"{sorted(cited_file_ids - pre_upgrade_file_ids)}"
+        pre_migration_file_ids = set(file_search_citations_baseline["file_ids"])
+        assert cited_file_ids <= pre_migration_file_ids, (
+            "Citations reference file ids that did not exist before migration: "
+            f"{sorted(cited_file_ids - pre_migration_file_ids)}"
         )
