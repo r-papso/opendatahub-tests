@@ -1,34 +1,28 @@
-"""Reverting external routing from Praxis back to OGX during the transition window.
+"""Rollback to OGX after an isolated OGX -> Praxis migration.
 
-The rollback itself is not driven from here: like the upgrade it brackets, it is
-applied to the test environment between the two pytest runs, so the coverage is
-split into a pre-rollback test that records what must survive and a post-rollback
-test that checks it did.
-
-Both runs reach the server the same way a client would, through the external
-Gateway hostname. The hostname is recorded before the rollback and compared
-afterwards, so a rollback that only works because the client was reconfigured
-cannot pass.
+The module owns the complete lifecycle: it seeds OGX, runs the Praxis migration,
+captures the migrated state, rolls external routing back to OGX, and verifies
+that the unchanged Gateway hostname serves the same state from OGX.
 """
+
+from collections.abc import Callable
+from typing import Any
 
 import pytest
 import structlog
 from kubernetes.dynamic import DynamicClient
 from kubernetes.dynamic.exceptions import ResourceNotFoundError
-from ocp_resources.namespace import Namespace
 from ocp_resources.pod import Pod
+from ocp_resources.resource import ResourceEditor
 from ocp_resources.service import Service
 from ogx_client import OgxClient
+from timeout_sampler import TimeoutSampler
 
 from tests.ogx.constants import ModelInfo
-from tests.ogx.praxis.constants import (
-    NAMESPACE_PARAMS,
-    OGX_SERVER_PARAMS,
-)
+from tests.ogx.praxis.constants import RESPONSES_API_PATH
 from tests.ogx.praxis.upgrade.constants import (
     MAX_LISTED_RESOURCES,
     OGX_SERVICE_NAME_SUFFIX,
-    ROLLBACK_INVENTORY_CONFIG_MAP_KEY,
     ROLLBACK_PROBE_MARKER,
     SEED_CONVERSATIONS_COUNT,
     SEED_FILES_COUNT,
@@ -39,27 +33,91 @@ from tests.ogx.praxis.upgrade.utils import (
     RollbackBaseline,
     capture_state_inventory,
     format_field_diff,
-    load_baseline_section,
     sampled_resource_ids,
-    save_baseline_section,
     seed_conversations,
     seed_files,
     seed_responses,
 )
-from tests.ogx.praxis.utils import pods_for_service, pods_logging_marker
+from tests.ogx.praxis.utils import backend_services, gateway_base_url, pods_for_service, pods_logging_marker
+from utilities.resources.http_route import HTTPRoute
 from utilities.resources.ogx_server import OgxServer
 
 LOGGER = structlog.get_logger(name=__name__)
 
+# This migration owns a namespace and OGXServer so it cannot share state with
+# another OGX -> Praxis migration module.
+NAMESPACE_PARAMS: dict[str, Any] = {"name": "test-ogx-praxis-rollback"}
+OGX_SERVER_PARAMS: dict[str, Any] = {
+    "ogx_storage_size": "2Gi",
+    "vector_io_provider": "pgvector",
+    "files_provider": "local",
+}
+
+OGX_SERVER_ROLLBACK_PATCH: dict[str, Any] = {"spec": {"praxisMode": {"enabled": False}}}
+ROLLBACK_RECONCILIATION_TIMEOUT: int = 300
+ROLLBACK_POLL_INTERVAL: int = 5
+
+
+def wait_for_responses_route_to_ogx(
+    admin_client: DynamicClient,
+    ogx_server: OgxServer,
+    responses_http_route: HTTPRoute,
+) -> set[str]:
+    """Wait until the Responses API route is backed only by the OGX Service.
+
+    Args:
+        admin_client: Client with cluster-wide access to resolve route backends.
+        ogx_server: OGXServer whose Service must become the route backend.
+        responses_http_route: Public HTTPRoute serving the Responses API.
+
+    Returns:
+        Names of the Services backing the Responses API after reconciliation.
+    """
+    expected_backend = f"{ogx_server.name}{OGX_SERVICE_NAME_SUFFIX}"
+    rolled_back_backends: set[str] = set()
+    for services in TimeoutSampler(
+        wait_timeout=ROLLBACK_RECONCILIATION_TIMEOUT,
+        sleep=ROLLBACK_POLL_INTERVAL,
+        func=backend_services,
+        client=admin_client,
+        http_route=responses_http_route,
+        path=RESPONSES_API_PATH,
+    ):
+        rolled_back_backends = {str(service.name) for service in services}
+        if rolled_back_backends == {expected_backend}:
+            break
+
+    return rolled_back_backends
+
+
+def rollback_to_ogx(
+    admin_client: DynamicClient,
+    ogx_server: OgxServer,
+    responses_http_route: HTTPRoute,
+) -> set[str]:
+    """Disable Praxis mode and wait for the Responses route to return to OGX.
+
+    Args:
+        admin_client: Client with cluster-wide access to resolve route backends.
+        ogx_server: OGXServer whose Praxis mode is disabled.
+        responses_http_route: Public HTTPRoute serving the Responses API.
+
+    Returns:
+        Names of the Services backing the Responses API after reconciliation.
+    """
+    ResourceEditor(patches={ogx_server: OGX_SERVER_ROLLBACK_PATCH}).update()
+    LOGGER.info(f"Applied rollback patch to OGXServer {ogx_server.namespace}/{ogx_server.name}")
+
+    return wait_for_responses_route_to_ogx(
+        admin_client=admin_client,
+        ogx_server=ogx_server,
+        responses_http_route=responses_http_route,
+    )
+
 
 @pytest.fixture(scope="class")
 def ogx_serving_pods(unprivileged_client: DynamicClient, ogx_server: OgxServer) -> list[Pod]:
-    """The pods behind the OGX Service, whose logs must show the post-rollback request.
-
-    Raises:
-        ResourceNotFoundError: If the OGX Service selects no pod, leaving nothing
-            to correlate the request against.
-    """
+    """The pods behind the OGX Service after rollback."""
     service = Service(
         client=unprivileged_client,
         name=f"{ogx_server.name}{OGX_SERVICE_NAME_SUFFIX}",
@@ -81,39 +139,39 @@ def ogx_serving_pods(unprivileged_client: DynamicClient, ogx_server: OgxServer) 
 @pytest.mark.ogx
 @pytest.mark.tier1
 @pytest.mark.slow
-class TestPreRollbackFromPraxisToOgx:
-    """Recording what the rollback from Praxis back to OGX must preserve."""
+class TestRollbackFromPraxisToOgx:
+    """Verify an isolated migration can be rolled back to OGX."""
 
-    @pytest.mark.pre_upgrade
-    def test_capture_state_inventory_pre_rollback(
+    def test_rollback_serves_from_ogx_with_state_intact(
         self,
-        unprivileged_client: DynamicClient,
-        unprivileged_model_namespace: Namespace,
+        admin_client: DynamicClient,
         ogx_server: OgxServer,
-        praxis_responses_url: str,
-        praxis_client: OgxClient,
+        ogx_client: OgxClient,
         ogx_models: ModelInfo,
+        praxis_migration_runner: Callable[[], OgxServer],
+        praxis_client: OgxClient,
+        praxis_responses_url: str,
+        praxis_responses_http_route: HTTPRoute,
+        ogx_serving_pods: list[Pod],
     ) -> None:
-        """Capture the state inventory the rollback has to leave intact.
+        """Verify OGX serves the rolled-back endpoint without losing migrated state.
 
-        Given: A cluster whose external Gateway hostname serves `/v1/responses`.
-        When: Files, vector stores, conversations and responses are created
-            through it, then counted and read back.
-        Then: Every created resource resolves, and the inventory and the external
-            URL are persisted for the post-rollback run to compare against.
+        Given: An isolated OGXServer with files, a vector store, conversations,
+            and responses seeded before migration to Praxis.
+        When: Praxis migration is run and then `praxisMode` is disabled to roll
+            the external endpoint back to OGX.
+        Then: The unchanged Gateway hostname is served by OGX, and every count
+            and sampled resource is unchanged from immediately before rollback.
         """
-        # State is seeded rather than discovered so that the inventory comparison
-        # has something to lose; comparing empty counts would pass whatever the
-        # rollback did.
-        conversation_ids = seed_conversations(ogx_client=praxis_client, count=SEED_CONVERSATIONS_COUNT)
-        # The vector store is left empty on purpose: an attached file would keep
-        # its status moving while it is ingested, and status is a compared field.
-        vector_store = praxis_client.vector_stores.create(name=f"{SEED_MARKER}-rollback")
-        sampled_state_ids = {
-            "files": seed_files(ogx_client=praxis_client, count=SEED_FILES_COUNT),
+        conversation_ids = seed_conversations(ogx_client=ogx_client, count=SEED_CONVERSATIONS_COUNT)
+        # The vector store is left empty so its compared status cannot change
+        # asynchronously while a file is ingested.
+        vector_store = ogx_client.vector_stores.create(name=f"{SEED_MARKER}-rollback")
+        seeded_state_ids = {
+            "files": seed_files(ogx_client=ogx_client, count=SEED_FILES_COUNT),
             "vector_stores": [vector_store.id],
             "responses": seed_responses(
-                ogx_client=praxis_client,
+                ogx_client=ogx_client,
                 model_id=ogx_models.model_id,
                 count=SEED_RESPONSES_COUNT,
                 conversation_id=conversation_ids[0],
@@ -121,72 +179,44 @@ class TestPreRollbackFromPraxisToOgx:
             "conversations": conversation_ids,
         }
 
-        inventory = capture_state_inventory(ogx_client=praxis_client, sampled_ids=sampled_state_ids)
-        assert not inventory["missing"], f"State sampled before the rollback does not resolve: {inventory['missing']}"
+        praxis_migration_runner()
+        LOGGER.info("Completed OGX to Praxis migration")
 
-        save_baseline_section(
-            client=unprivileged_client,
-            namespace=unprivileged_model_namespace.name,
-            section=ROLLBACK_INVENTORY_CONFIG_MAP_KEY,
-            payload=RollbackBaseline(inventory=inventory, external_url=praxis_responses_url),
+        inventory_before = capture_state_inventory(ogx_client=praxis_client, sampled_ids=seeded_state_ids)
+        assert not inventory_before["missing"], (
+            f"Migrated state sampled before rollback does not resolve: {inventory_before['missing']}"
+        )
+        baseline = RollbackBaseline(inventory=inventory_before, external_url=praxis_responses_url)
+
+        expected_backend = f"{ogx_server.name}{OGX_SERVICE_NAME_SUFFIX}"
+        rolled_back_backends = rollback_to_ogx(
+            admin_client=admin_client,
+            ogx_server=ogx_server,
+            responses_http_route=praxis_responses_http_route,
         )
 
-
-@pytest.mark.parametrize(
-    "unprivileged_model_namespace, ogx_server",
-    [pytest.param(NAMESPACE_PARAMS, OGX_SERVER_PARAMS)],
-    indirect=True,
-)
-@pytest.mark.ogx
-@pytest.mark.tier1
-@pytest.mark.slow
-class TestPostRollbackFromPraxisToOgx:
-    """Rolling external routing back from Praxis to OGX during the transition window."""
-
-    @pytest.mark.post_upgrade
-    def test_rollback_serves_from_ogx_with_state_intact(
-        self,
-        unprivileged_client: DynamicClient,
-        unprivileged_model_namespace: Namespace,
-        ogx_server: OgxServer,
-        praxis_responses_url: str,
-        ogx_serving_pods: list[Pod],
-        praxis_client: OgxClient,
-        ogx_models: ModelInfo,
-    ) -> None:
-        """Verify that OGX serves the rolled-back endpoint and that no state was lost.
-
-        Given: A cluster that routed `/v1/responses` to Praxis and has since had
-            the documented rollback procedure applied to it.
-        When: A response is created through the unchanged external hostname and
-            the pre-rollback state inventory is re-captured through it.
-        Then: The new response appears in the OGX pod logs, so OGX and not Praxis
-            served it, and every count and sampled resource is unchanged.
-        """
-        baseline: RollbackBaseline = load_baseline_section(
-            client=unprivileged_client,
-            namespace=unprivileged_model_namespace.name,
-            section=ROLLBACK_INVENTORY_CONFIG_MAP_KEY,
-        )
-        assert praxis_responses_url == baseline["external_url"], (
-            f"The external hostname changed across the rollback: it was {baseline['external_url']} before and is "
-            f"{praxis_responses_url} now, so the client would have had to be reconfigured"
+        assert rolled_back_backends == {expected_backend}, (
+            f"After rollback, {RESPONSES_API_PATH} should be backed by OGX Service '{expected_backend}' alone, "
+            f"but HTTPRoute {praxis_responses_http_route.namespace}/{praxis_responses_http_route.name} forwards to "
+            f"{sorted(rolled_back_backends)}"
         )
 
-        # Unstored on purpose, so that probing does not change the response count
-        # the inventory compares.
+        current_responses_url = f"{gateway_base_url(http_route=praxis_responses_http_route)}{RESPONSES_API_PATH}"
+        assert current_responses_url == baseline["external_url"], (
+            f"The external hostname changed across rollback: it was {baseline['external_url']} before and is "
+            f"{current_responses_url} now, so the client would have had to be reconfigured"
+        )
+
+        # Unstored on purpose, so probing does not change the response count.
         probe = praxis_client.responses.create(
             input=f"Reply with the single word '{ROLLBACK_PROBE_MARKER}'.",
             model=ogx_models.model_id,
             store=False,
             stream=False,
         )
-        # Correlating by response id requires the distribution to log it; a quiet
-        # log level makes this fail rather than pass silently, which is the point:
-        # without the correlation there is no evidence of which workload answered.
         pods_serving_probe = pods_logging_marker(pods=ogx_serving_pods, marker=probe.id)
         assert pods_serving_probe, (
-            f"Response '{probe.id}' created through {praxis_responses_url} does not appear in the logs of the OGX "
+            f"Response '{probe.id}' created through {current_responses_url} does not appear in the logs of the OGX "
             f"pods {[pod.name for pod in ogx_serving_pods]}, so there is no evidence OGX rather than Praxis served it"
         )
         LOGGER.info(f"Response '{probe.id}' was served by OGX pods {pods_serving_probe}")
@@ -201,7 +231,7 @@ class TestPostRollbackFromPraxisToOgx:
             f"Sampled state no longer resolves through the rolled-back endpoint: {inventory_after['missing']}"
         )
         assert inventory_after["counts"] == recorded_inventory["counts"], (
-            f"State counts changed across the rollback: {recorded_inventory['counts']} -> "
+            f"State counts changed across rollback: {recorded_inventory['counts']} -> "
             f"{inventory_after['counts']} (listings are capped at {MAX_LISTED_RESOURCES} items)"
         )
 
@@ -218,4 +248,4 @@ class TestPostRollbackFromPraxisToOgx:
                 )
             )
         ]
-        assert not differences, "Sampled resources changed across the rollback: " + "; ".join(differences)
+        assert not differences, "Sampled resources changed across rollback: " + "; ".join(differences)
