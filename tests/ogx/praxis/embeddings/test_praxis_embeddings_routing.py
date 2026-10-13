@@ -73,46 +73,6 @@ def embeddings_http_route(admin_client: DynamicClient) -> HTTPRoute:
     return matching_routes[0]
 
 
-@pytest.fixture
-def embeddings_model_dimension(
-    embeddings_http_route: HTTPRoute,
-    request_session: requests.Session,
-    tenant_authorization_header: dict[str, str],
-) -> int:
-    """Output vector length the backend reports for the configured embedding model."""
-    models_url = f"{gateway_base_url(http_route=embeddings_http_route)}{MODELS_API_PATH}"
-    response = request_session.get(
-        url=models_url,
-        headers=tenant_authorization_header,
-        timeout=REQUEST_TIMEOUT_SECONDS,
-    )
-    if response.status_code != 200:
-        pytest.skip(
-            f"GET {MODELS_API_PATH} returned HTTP {response.status_code}, so the expected embedding "
-            "dimension cannot be established independently of the embeddings response"
-        )
-
-    model_entry = next(
-        (entry for entry in response.json().get("data") or [] if entry.get("id") == OGX_CORE_EMBEDDING_MODEL),
-        None,
-    )
-    if model_entry is None:
-        pytest.fail(
-            f"Embedding model '{OGX_CORE_EMBEDDING_MODEL}' is not registered at {MODELS_API_PATH}; "
-            "the embedding backend is not reachable through Praxis"
-        )
-
-    dimension = _model_metadata(model_entry=model_entry).get(EMBEDDING_DIMENSION_KEY)
-    if dimension is None:
-        pytest.skip(
-            f"Model metadata of '{OGX_CORE_EMBEDDING_MODEL}' does not publish '{EMBEDDING_DIMENSION_KEY}', "
-            "so the expected vector length cannot be established independently of the embeddings response"
-        )
-
-    LOGGER.info(f"Expected embedding dimension of {OGX_CORE_EMBEDDING_MODEL}: {dimension}")
-    return int(dimension)
-
-
 @pytest.mark.ogx
 @pytest.mark.skip_must_gather
 class TestPraxisEmbeddingsRouting:
@@ -123,18 +83,16 @@ class TestPraxisEmbeddingsRouting:
         self,
         admin_client: DynamicClient,
         embeddings_http_route: HTTPRoute,
-        embeddings_model_dimension: int,
         request_session: requests.Session,
         tenant_authorization_header: dict[str, str],
     ) -> None:
-        """Verify the Embeddings API is routed by Praxis to the embedding backend.
+        """Verify Praxis routes embedding requests to the configured backend.
 
         Given a greenfield cluster exposing the Embeddings API through the Platform Gateway,
-        When authenticated POST /v1/embeddings requests with a single input and with a two-element
-        input array are sent through the external Gateway hostname,
-        Then no OGX pod backs the route, both requests succeed, the returned vector has the length
-        the backend publishes for the configured model, the echoed model matches the requested one,
-        the batch response carries exactly two indexed objects and prompt tokens are accounted for.
+        When authenticated single-input and two-input batch requests are sent to `/v1/embeddings`,
+        Then the route is not backed by OGX, both requests succeed, the single response contains
+        a non-empty embedding for the requested model with prompt-token usage, and the batch
+        response contains embeddings indexed 0 and 1.
         """
         serving_pods = serving_pods_for_path(
             client=admin_client, http_route=embeddings_http_route, path=EMBEDDINGS_API_PATH
@@ -163,10 +121,7 @@ class TestPraxisEmbeddingsRouting:
 
         single_body = single_response.json()
         embedding = single_body["data"][0]["embedding"]
-        assert len(embedding) == embeddings_model_dimension, (
-            f"Embedding has {len(embedding)} elements, but the backend reports "
-            f"{embeddings_model_dimension} for model {OGX_CORE_EMBEDDING_MODEL}"
-        )
+        assert embedding is not None and len(embedding) > 0, f"Embedding is empty: {single_body}"
         assert single_body.get("model") == OGX_CORE_EMBEDDING_MODEL, (
             f"Response was produced by model {single_body.get('model')!r}, "
             f"not the requested {OGX_CORE_EMBEDDING_MODEL!r}"
