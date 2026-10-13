@@ -1,26 +1,13 @@
-"""OGX -> Praxis database migration coverage for the upgrade pipeline.
+"""Isolated OGX -> Praxis database migration coverage."""
 
-The pre-upgrade test seeds the OGX responses and conversations tables through the
-OGX API, and brings up the Praxis (target) PostgreSQL instance together with the
-Secret holding its connection string. The upgrade itself -- enabling
-`spec.praxisMode` and pointing `migrationJob.targetConnectionString` at that
-Secret -- is performed by the Jenkins job that runs these tests.
-The post-upgrade test waits for the operator-created migration Job and then
-compares both tables row by row, reading the two PostgreSQL databases directly so
-that neither OGX nor Praxis needs to be serving traffic.
-
-Both tests emit a JSON report with before/after row counts and the active
-embedding model, for retention as a CI artifact.
-"""
+from collections.abc import Callable
+from typing import Any
 
 import pytest
-from kubernetes.dynamic import DynamicClient
 from ocp_resources.pod import Pod
-from ocp_resources.secret import Secret
 from ogx_client import OgxClient
 
 from tests.ogx.constants import ModelInfo
-from tests.ogx.praxis.constants import NAMESPACE_PARAMS, OGX_SERVER_PARAMS
 from tests.ogx.praxis.upgrade.constants import (
     OGX_POSTGRES_DATABASE,
     PRAXIS_POSTGRES_DATABASE,
@@ -37,7 +24,6 @@ from tests.ogx.praxis.upgrade.utils import (
     query_database,
     seed_conversations,
     seed_responses,
-    wait_for_migration_job_completion,
 )
 from utilities.resources.ogx_server import OgxServer
 
@@ -62,6 +48,15 @@ SOURCE_CONVERSATIONS_QUERY = _conversations_query(table_name=SOURCE_CONVERSATION
 TARGET_RESPONSES_QUERY = _responses_query(table_name=TARGET_RESPONSES_TABLE)
 TARGET_CONVERSATIONS_QUERY = _conversations_query(table_name=TARGET_CONVERSATIONS_TABLE, id_column="conversation_id")
 
+# This migration owns a namespace and OGXServer so it cannot share state with
+# other OGX -> Praxis migration modules.
+NAMESPACE_PARAMS: dict[str, Any] = {"name": "test-ogx-praxis-db-migration"}
+OGX_SERVER_PARAMS: dict[str, Any] = {
+    "ogx_storage_size": "2Gi",
+    "vector_io_provider": "pgvector",
+    "files_provider": "local",
+}
+
 
 @pytest.mark.parametrize(
     "unprivileged_model_namespace, ogx_server",
@@ -69,24 +64,22 @@ TARGET_CONVERSATIONS_QUERY = _conversations_query(table_name=TARGET_CONVERSATION
     indirect=True,
 )
 @pytest.mark.ogx
-class TestPreUpgradePraxisDbMigration:
-    @pytest.mark.pre_upgrade
-    def test_seed_ogx_responses_and_conversations_pre_upgrade(
+class TestPraxisDbMigration:
+    def test_responses_and_conversations_migrated_to_praxis(
         self,
         ogx_client: OgxClient,
         ogx_models: ModelInfo,
-        ogx_server: OgxServer,
         ogx_postgres_pod: Pod,
-        praxis_connection_string_secret: Secret,
+        praxis_migration_runner: Callable[[], OgxServer],
+        praxis_postgres_pod: Pod,
     ) -> None:
-        """Populate the OGX responses and conversations tables before the upgrade.
+        """Verify seeded OGX responses and conversations are migrated to Praxis.
 
-        Given: A running OGX distribution backed by PostgreSQL, before the Praxis upgrade.
-        When: Conversations and stored responses are created through the OGX API.
-        Then: The rows are readable in the OGX conversations and responses tables,
-            and the before-upgrade counts are reported. The Praxis database and its
-            connection-string Secret are left in place for the upgrade step.
+        Given: An isolated OGXServer with seeded responses and conversations.
+        When: Praxis migration mode is enabled and its migration Job completes.
+        Then: Every source row is present in Praxis with matching field values.
         """
+        # Seed and verify the source before enabling migration mode.
         conversation_ids = seed_conversations(ogx_client=ogx_client, count=SEED_CONVERSATIONS_COUNT)
         response_ids = seed_responses(
             ogx_client=ogx_client,
@@ -117,36 +110,10 @@ class TestPreUpgradePraxisDbMigration:
             f"{sorted(set(conversation_ids) - stored_conversation_ids)}"
         )
 
+        # Run the migration job.
+        praxis_migration_runner()
 
-@pytest.mark.parametrize(
-    "unprivileged_model_namespace, ogx_server",
-    [pytest.param(NAMESPACE_PARAMS, OGX_SERVER_PARAMS)],
-    indirect=True,
-)
-@pytest.mark.ogx
-class TestPostUpgradePraxisDbMigration:
-    @pytest.mark.post_upgrade
-    def test_responses_and_conversations_migrated_to_praxis_post_upgrade(
-        self,
-        unprivileged_client: DynamicClient,
-        ogx_server: OgxServer,
-        ogx_postgres_pod: Pod,
-        configured_migration_target: dict[str, str],
-        praxis_connection_string_secret: Secret,
-        praxis_postgres_pod: Pod,
-    ) -> None:
-        """Verify the migration Job copied the OGX responses and conversations into Praxis.
-
-        Given: An upgraded OGX distribution with `praxisMode.migrationJob` configured,
-            whose source database still holds the rows seeded before the upgrade.
-        When: The operator-created migration Job has completed and both databases
-            are read directly.
-        Then: Every source row is present in the Praxis table with matching field
-            values. Rows present only in Praxis are tolerated for conversations,
-            where the migration synthesizes entries for message-only conversations.
-        """
-        wait_for_migration_job_completion(client=unprivileged_client, ogx_server=ogx_server)
-
+        # Read both databases directly.
         responses_parity = compare_rows(
             table=SOURCE_RESPONSES_TABLE,
             source_rows=query_database(
@@ -181,12 +148,10 @@ class TestPostUpgradePraxisDbMigration:
         )
 
         assert responses_parity.source_count, (
-            f"No rows found in the source {SOURCE_RESPONSES_TABLE} table; the pre-upgrade test did not seed "
-            "data, so migration parity cannot be asserted"
+            f"No rows found in the source {SOURCE_RESPONSES_TABLE} table; migration parity cannot be asserted"
         )
         assert conversations_parity.source_count, (
-            f"No rows found in the source {SOURCE_CONVERSATIONS_TABLE} table; the pre-upgrade test did not seed "
-            "data, so migration parity cannot be asserted"
+            f"No rows found in the source {SOURCE_CONVERSATIONS_TABLE} table; migration parity cannot be asserted"
         )
         failures = [
             format_parity_failure(parity=responses_parity, allow_extra_in_target=False),
