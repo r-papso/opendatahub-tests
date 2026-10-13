@@ -1,6 +1,6 @@
-"""Write-path ownership of resources created through Praxis after the upgrade.
+"""Write-path ownership of resources created through Praxis after migration.
 
-In the upgraded topology Praxis fronts OGX, and a resource created afterwards
+After migration Praxis fronts OGX, and a resource created through Praxis
 must land in exactly one of the two state stores: in both it is a dual write,
 in neither it was never persisted at all.
 
@@ -12,13 +12,14 @@ type is deliberately not asserted: the test pins the invariant rather than the
 current answer.
 """
 
+from typing import Any
+
 import pytest
 import structlog
 from ocp_resources.pod import Pod
 from ogx_client import OgxClient
 
 from tests.ogx.constants import ModelInfo
-from tests.ogx.praxis.constants import NAMESPACE_PARAMS, OGX_SERVER_PARAMS
 from tests.ogx.praxis.upgrade.constants import (
     OGX_POSTGRES_DATABASE,
     PRAXIS_POSTGRES_DATABASE,
@@ -42,16 +43,20 @@ from tests.ogx.utils import vector_store_create_and_poll
 
 LOGGER = structlog.get_logger(name=__name__)
 
-# Must match `vector_io_provider` in the shared `OGX_SERVER_PARAMS`: the vector
-# store is created explicitly rather than through the shared `vector_store`
-# fixture, because that fixture reuses the pre-upgrade store, while this test
-# needs a store written after the upgrade.
+# This migration owns a namespace and OGXServer so it cannot share state with
+# other OGX -> Praxis migration modules.
+NAMESPACE_PARAMS: dict[str, Any] = {"name": "test-ogx-praxis-write-path-ownership"}
+OGX_SERVER_PARAMS: dict[str, Any] = {
+    "ogx_storage_size": "2Gi",
+    "vector_io_provider": "pgvector",
+    "files_provider": "local",
+}
+
+# Must match `vector_io_provider` in `OGX_SERVER_PARAMS`. The vector store is
+# created explicitly because this test needs a store written after migration.
 VECTOR_IO_PROVIDER: str = "pgvector"
 
 
-# The shared upgrade environment, which the Praxis database-migration suite deploys
-# both PostgreSQL instances into during its pre-upgrade phase. This test is
-# post-upgrade only and reads them, so it must resolve the same namespace.
 @pytest.mark.parametrize(
     "unprivileged_model_namespace, ogx_server",
     [pytest.param(NAMESPACE_PARAMS, OGX_SERVER_PARAMS)],
@@ -60,9 +65,8 @@ VECTOR_IO_PROVIDER: str = "pgvector"
 @pytest.mark.ogx
 @pytest.mark.tier1
 class TestPraxisWritePathOwnership:
-    """Verify post-upgrade writes reach a single authoritative state store."""
+    """Verify writes reach a single authoritative state store."""
 
-    @pytest.mark.post_upgrade
     def test_resources_written_to_single_backend(
         self,
         praxis_client: OgxClient,
@@ -72,8 +76,8 @@ class TestPraxisWritePathOwnership:
     ) -> None:
         """Verify resources created through Praxis are stored by exactly one backend.
 
-        Given: A cluster upgraded to 3.6, with Praxis fronting OGX and both the OGX and
-            the Praxis PostgreSQL databases reachable.
+        Given: A cluster with Praxis fronting OGX and both the OGX and the Praxis
+            PostgreSQL databases reachable.
         When: A file, a vector store with that file attached, a conversation and a
             response are created through the public API.
         Then: Every create call returns a non-empty id, the file-to-vector-store
