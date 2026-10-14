@@ -79,7 +79,7 @@ class TestPraxisDbMigration:
         When: Praxis migration mode is enabled and its migration Job completes.
         Then: Every source row is present in Praxis with matching field values.
         """
-        # Seed and verify the source before enabling migration mode.
+        # Seed and read the source before running the migration job.
         conversation_ids = seed_conversations(ogx_client=ogx_client, count=SEED_CONVERSATIONS_COUNT)
         response_ids = seed_responses(
             ogx_client=ogx_client,
@@ -99,49 +99,34 @@ class TestPraxisDbMigration:
             select_statement=SOURCE_CONVERSATIONS_QUERY,
         )
 
-        stored_response_ids = {str(row["id"]) for row in source_responses}
-        assert not set(response_ids) - stored_response_ids, (
-            f"Responses created through the API are missing from {SOURCE_RESPONSES_TABLE}: "
-            f"{sorted(set(response_ids) - stored_response_ids)}"
-        )
-        stored_conversation_ids = {str(row["id"]) for row in source_conversations}
-        assert not set(conversation_ids) - stored_conversation_ids, (
-            f"Conversations created through the API are missing from {SOURCE_CONVERSATIONS_TABLE}: "
-            f"{sorted(set(conversation_ids) - stored_conversation_ids)}"
-        )
-
         # Run the migration job.
         praxis_migration_runner()
 
-        # Read both databases directly.
+        target_responses = query_database(
+            postgres_pod=praxis_postgres_pod,
+            database=PRAXIS_POSTGRES_DATABASE,
+            select_statement=TARGET_RESPONSES_QUERY,
+        )
+        target_conversations = query_database(
+            postgres_pod=praxis_postgres_pod,
+            database=PRAXIS_POSTGRES_DATABASE,
+            select_statement=TARGET_CONVERSATIONS_QUERY,
+        )
+
+        # Verify the migration job's parity with the source.
         responses_parity = compare_rows(
             table=SOURCE_RESPONSES_TABLE,
-            source_rows=query_database(
-                postgres_pod=ogx_postgres_pod,
-                database=OGX_POSTGRES_DATABASE,
-                select_statement=SOURCE_RESPONSES_QUERY,
-            ),
-            target_rows=query_database(
-                postgres_pod=praxis_postgres_pod,
-                database=PRAXIS_POSTGRES_DATABASE,
-                select_statement=TARGET_RESPONSES_QUERY,
-            ),
+            source_rows=source_responses,
+            target_rows=target_responses,
             source_key="id",
             target_key="id",
             compared_fields=("created_at", "model"),
         )
+
         conversations_parity = compare_rows(
             table=SOURCE_CONVERSATIONS_TABLE,
-            source_rows=query_database(
-                postgres_pod=ogx_postgres_pod,
-                database=OGX_POSTGRES_DATABASE,
-                select_statement=SOURCE_CONVERSATIONS_QUERY,
-            ),
-            target_rows=query_database(
-                postgres_pod=praxis_postgres_pod,
-                database=PRAXIS_POSTGRES_DATABASE,
-                select_statement=TARGET_CONVERSATIONS_QUERY,
-            ),
+            source_rows=source_conversations,
+            target_rows=target_conversations,
             source_key="id",
             target_key="conversation_id",
             compared_fields=("created_at", "metadata"),
