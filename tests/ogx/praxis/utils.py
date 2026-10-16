@@ -8,10 +8,9 @@ Praxis naming is hardcoded, so a missing or ambiguous route cannot pass unnotice
 import json
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from typing import Any, Callable, TypedDict
+from typing import Any, TypedDict
 from urllib.parse import quote
 
-from kubernetes.dynamic.client import ApiException
 import pytest
 import structlog
 from kubernetes.dynamic import DynamicClient
