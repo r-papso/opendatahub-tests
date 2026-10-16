@@ -1,0 +1,119 @@
+"""Routing of the `/v1/embeddings` API after the OGX -> Praxis migration.
+
+On a greenfield RHOAI 3.6 cluster the Embeddings API is exposed through the
+Platform Gateway and must be routed by Praxis to the configured embedding
+backend. The serving workload is resolved from the cluster by following the
+matching HTTPRoute to its backend Service and from there to its pods, so a route
+still pointing at OGX cannot pass unnoticed.
+
+The expected vector dimension is read from the backend's model metadata through
+`GET /v1/models` before any embedding is requested, so the length assertion
+compares against a value established independently of the embeddings response.
+"""
+
+from typing import Final
+
+import pytest
+import requests
+import structlog
+from kubernetes.dynamic import DynamicClient
+from ocp_resources.pod import Pod
+
+from tests.ogx.constants import OGX_CORE_EMBEDDING_MODEL, OGX_CORE_POD_FILTER
+from tests.ogx.praxis.constants import EMBEDDINGS_API_PATH, REQUEST_TIMEOUT_SECONDS
+from tests.ogx.praxis.utils import gateway_base_url, http_routes_matching_path, serving_pods_for_path
+from utilities.resources.http_route import HTTPRoute
+
+LOGGER = structlog.get_logger(name=__name__)
+
+EMBEDDINGS_INPUT: Final[str] = "quarterly migration readiness review"
+EMBEDDINGS_BATCH_INPUT: Final[list[str]] = [
+    "quarterly migration readiness review",
+    "greenfield deployment acceptance criteria",
+]
+
+
+@pytest.fixture
+def embeddings_http_route(admin_client: DynamicClient) -> HTTPRoute:
+    """The HTTPRoute that declares the `/v1/embeddings` path."""
+    matching_routes = http_routes_matching_path(client=admin_client, path=EMBEDDINGS_API_PATH)
+    if len(matching_routes) != 1:
+        pytest.fail(
+            f"Expected exactly one HTTPRoute declaring {EMBEDDINGS_API_PATH}, found "
+            f"{[f'{route.namespace}/{route.name}' for route in matching_routes]}"
+        )
+    return matching_routes[0]
+
+
+@pytest.mark.ogx
+@pytest.mark.skip_must_gather
+class TestPraxisEmbeddingsRouting:
+    """Verify Praxis routes `/v1/embeddings` to the configured embedding backend."""
+
+    @pytest.mark.tier1
+    def test_embeddings_routed_by_praxis_to_embedding_backend(
+        self,
+        admin_client: DynamicClient,
+        embeddings_http_route: HTTPRoute,
+        request_session: requests.Session,
+        tenant_authorization_header: dict[str, str],
+    ) -> None:
+        """Verify Praxis routes embedding requests to the configured backend.
+
+        Given a greenfield cluster exposing the Embeddings API through the Platform Gateway,
+        When authenticated single-input and two-input batch requests are sent to `/v1/embeddings`,
+        Then the route is not backed by OGX, both requests succeed, the single response contains
+        a non-empty embedding for the requested model with prompt-token usage, and the batch
+        response contains embeddings indexed 0 and 1.
+        """
+        serving_pods = serving_pods_for_path(
+            client=admin_client, http_route=embeddings_http_route, path=EMBEDDINGS_API_PATH
+        )
+        ogx_pod_keys = {
+            (pod.namespace, pod.name) for pod in Pod.get(client=admin_client, label_selector=OGX_CORE_POD_FILTER)
+        }
+        serving_ogx_pods = sorted(
+            f"{pod.namespace}/{pod.name}" for pod in serving_pods if (pod.namespace, pod.name) in ogx_pod_keys
+        )
+        assert not serving_ogx_pods, (
+            f"{EMBEDDINGS_API_PATH} is backed by OGX pods {serving_ogx_pods}; it must be routed by Praxis"
+        )
+
+        embeddings_url = f"{gateway_base_url(http_route=embeddings_http_route)}{EMBEDDINGS_API_PATH}"
+        LOGGER.info(f"POST {embeddings_url} with model {OGX_CORE_EMBEDDING_MODEL}")
+        single_response = request_session.post(
+            url=embeddings_url,
+            headers=tenant_authorization_header,
+            json={"model": OGX_CORE_EMBEDDING_MODEL, "input": EMBEDDINGS_INPUT},
+            timeout=REQUEST_TIMEOUT_SECONDS,
+        )
+        assert single_response.status_code == 200, (
+            f"POST {EMBEDDINGS_API_PATH} returned HTTP {single_response.status_code}: {single_response.text[:200]}"
+        )
+
+        single_body = single_response.json()
+        embedding = single_body["data"][0]["embedding"]
+        assert embedding is not None and len(embedding) > 0, f"Embedding is empty: {single_body}"
+        assert single_body.get("model") == OGX_CORE_EMBEDDING_MODEL, (
+            f"Response was produced by model {single_body.get('model')!r}, "
+            f"not the requested {OGX_CORE_EMBEDDING_MODEL!r}"
+        )
+        assert single_body["usage"]["prompt_tokens"] > 0, (
+            f"Embeddings response reports no prompt tokens: {single_body.get('usage')}"
+        )
+
+        batch_response = request_session.post(
+            url=embeddings_url,
+            headers=tenant_authorization_header,
+            json={"model": OGX_CORE_EMBEDDING_MODEL, "input": EMBEDDINGS_BATCH_INPUT},
+            timeout=REQUEST_TIMEOUT_SECONDS,
+        )
+        assert batch_response.status_code == 200, (
+            f"Batch POST {EMBEDDINGS_API_PATH} returned HTTP {batch_response.status_code}: {batch_response.text[:200]}"
+        )
+
+        batch_data = batch_response.json()["data"]
+        assert [entry["index"] for entry in batch_data] == [0, 1], (
+            f"Batch of {len(EMBEDDINGS_BATCH_INPUT)} inputs returned indexes "
+            f"{[entry.get('index') for entry in batch_data]}, expected exactly [0, 1]"
+        )
