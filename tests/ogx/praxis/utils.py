@@ -8,12 +8,12 @@ Praxis naming is hardcoded, so a missing or ambiguous route cannot pass unnotice
 import json
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from typing import Any, TypedDict
+from typing import Any, Callable, TypedDict
 from urllib.parse import quote
 
+from kubernetes.dynamic.client import ApiException
 import pytest
 import structlog
-from kubernetes.client.exceptions import ApiException
 from kubernetes.dynamic import DynamicClient
 from kubernetes.dynamic.client import ApiException
 from kubernetes.dynamic.exceptions import ResourceNotFoundError
@@ -230,30 +230,6 @@ def pod_logs(pod: Pod) -> str:
     return "\n".join(
         pod.log(container=container["name"]) for container in pod.instance.to_dict()["spec"].get("containers") or []
     )
-
-
-def pods_logging_marker(pods: list[Pod], marker: str) -> list[str]:
-    """Return the names of the pods whose logs contain `marker`.
-
-    Used to correlate a single request against the workload that served it. A
-    pod whose logs cannot be read (for example because it has already been
-    replaced) is reported as not containing the marker.
-
-    Args:
-        pods: Pods whose logs are searched.
-        marker: Literal string to look for, typically a request or response id.
-
-    Returns:
-        The names of the matching pods.
-    """
-    matching: list[str] = []
-    for pod in pods:
-        try:
-            if marker in pod_logs(pod=pod):
-                matching.append(str(pod.name))
-        except ApiException as error:
-            LOGGER.warning(f"Could not read logs of pod {pod.namespace}/{pod.name}: {error}")
-    return matching
 
 
 def route_url(route: Route, path: str) -> str:
