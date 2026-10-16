@@ -20,7 +20,7 @@ from timeout_sampler import TimeoutSampler
 
 from tests.ogx.constants import ModelInfo
 from tests.ogx.praxis.constants import RESPONSES_API_PATH
-from tests.ogx.praxis.upgrade.constants import (
+from tests.ogx.praxis.constants import (
     MAX_LISTED_RESOURCES,
     OGX_SERVICE_NAME_SUFFIX,
     ROLLBACK_PROBE_MARKER,
@@ -29,7 +29,7 @@ from tests.ogx.praxis.upgrade.constants import (
     SEED_MARKER,
     SEED_RESPONSES_COUNT,
 )
-from tests.ogx.praxis.upgrade.utils import (
+from tests.ogx.praxis.utils import (
     RollbackBaseline,
     capture_state_inventory,
     format_field_diff,
