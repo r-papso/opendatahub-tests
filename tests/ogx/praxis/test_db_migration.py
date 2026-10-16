@@ -8,7 +8,7 @@ from ocp_resources.pod import Pod
 from ogx_client import OgxClient
 
 from tests.ogx.constants import ModelInfo
-from tests.ogx.praxis.upgrade.constants import (
+from tests.ogx.praxis.constants import (
     OGX_POSTGRES_DATABASE,
     PRAXIS_POSTGRES_DATABASE,
     SEED_CONVERSATIONS_COUNT,
@@ -18,7 +18,7 @@ from tests.ogx.praxis.upgrade.constants import (
     TARGET_CONVERSATIONS_TABLE,
     TARGET_RESPONSES_TABLE,
 )
-from tests.ogx.praxis.upgrade.utils import (
+from tests.ogx.praxis.utils import (
     compare_rows,
     format_parity_failure,
     query_database,
