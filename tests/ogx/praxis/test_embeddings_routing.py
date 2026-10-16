@@ -11,7 +11,7 @@ The expected vector dimension is read from the backend's model metadata through
 compares against a value established independently of the embeddings response.
 """
 
-from typing import Any, Final
+from typing import Final
 
 import pytest
 import requests
