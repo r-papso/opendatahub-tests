@@ -6,7 +6,7 @@ Praxis naming is hardcoded, so a missing or ambiguous route cannot pass unnotice
 """
 
 import json
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Any, Callable, TypedDict
 from urllib.parse import quote
@@ -15,6 +15,7 @@ from kubernetes.dynamic.client import ApiException
 import pytest
 import structlog
 from kubernetes.dynamic import DynamicClient
+from kubernetes.dynamic.client import ApiException
 from kubernetes.dynamic.exceptions import ResourceNotFoundError
 from ocp_resources.config_map import ConfigMap
 from ocp_resources.job import Job
