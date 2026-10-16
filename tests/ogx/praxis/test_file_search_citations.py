@@ -16,12 +16,12 @@ from ogx_client.types.vector_store import VectorStore
 from tests.ogx.constants import ModelInfo
 from tests.ogx.datasets import IBM_2025_Q4_EARNINGS
 from tests.ogx.praxis.constants import NAMESPACE_PARAMS, OGX_SERVER_PARAMS
-from tests.ogx.praxis.upgrade.constants import (
+from tests.ogx.praxis.constants import (
     CITATION_INSTRUCTIONS,
     CITATION_MAX_OUTPUT_TOKENS,
     CITATION_QUESTION,
 )
-from tests.ogx.praxis.upgrade.utils import FileSearchCitationBaseline
+from tests.ogx.praxis.utils import FileSearchCitationBaseline
 from utilities.resources.ogx_server import OgxServer
 
 
