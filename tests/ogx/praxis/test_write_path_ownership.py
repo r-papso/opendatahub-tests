@@ -20,7 +20,7 @@ from ocp_resources.pod import Pod
 from ogx_client import OgxClient
 
 from tests.ogx.constants import ModelInfo
-from tests.ogx.praxis.upgrade.constants import (
+from tests.ogx.praxis.constants import (
     OGX_POSTGRES_DATABASE,
     PRAXIS_POSTGRES_DATABASE,
     SEED_MARKER,
@@ -33,7 +33,7 @@ from tests.ogx.praxis.upgrade.constants import (
     TARGET_RESPONSES_TABLE,
     TARGET_VECTOR_STORES_TABLE,
 )
-from tests.ogx.praxis.upgrade.utils import (
+from tests.ogx.praxis.utils import (
     ids_present_in_table,
     seed_conversations,
     seed_files,
