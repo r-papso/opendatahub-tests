@@ -55,6 +55,8 @@ OGX_SERVER_PARAMS: dict[str, Any] = {
     "ogx_storage_size": "2Gi",
     "vector_io_provider": "pgvector",
     "files_provider": "local",
+    "cpu_requests": "500m",
+    "cpu_limits": "2",
 }
 
 
